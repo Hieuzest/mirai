@@ -47,12 +47,14 @@ import net.mamoe.mirai.qqandroid.network.protocol.packet.buildOutgoingUniPacket
 import net.mamoe.mirai.qqandroid.network.protocol.packet.chat.GroupInfoImpl
 import net.mamoe.mirai.qqandroid.network.protocol.packet.chat.NewContact
 import net.mamoe.mirai.qqandroid.network.protocol.packet.list.FriendList
+import net.mamoe.mirai.qqandroid.utils.AtomicResizeCacheList
 import net.mamoe.mirai.qqandroid.utils.io.serialization.readProtoBuf
 import net.mamoe.mirai.qqandroid.utils.io.serialization.writeProtoBuf
 import net.mamoe.mirai.qqandroid.utils.read
 import net.mamoe.mirai.qqandroid.utils.toInt
 import net.mamoe.mirai.qqandroid.utils.toUHexString
 import net.mamoe.mirai.utils.debug
+import net.mamoe.mirai.utils.secondsToMillis
 import net.mamoe.mirai.utils.warning
 import kotlin.random.Random
 
@@ -63,9 +65,13 @@ import kotlin.random.Random
 internal object MessageSvcPbGetMsg : OutgoingPacketFactory<MessageSvcPbGetMsg.Response>("MessageSvc.PbGetMsg") {
 
 
-    private val msgUidQueue = ArrayDeque<Long>()
-    private val msgUidSet = hashSetOf<Long>()
-    private val msgQueueMutex = Mutex()
+    private val msgCache = AtomicResizeCacheList<Triple<Int, Int, Long>>(20.secondsToMillis)
+
+    private fun ensureNoDuplication(msg: MsgComm.Msg): Boolean {
+        return msgCache.ensureNoDuplication(msg.msgHead.run {
+            Triple(msgSeq, msgTime, msgUid)
+        })
+    }
 
     @Suppress("SpellCheckingInspection")
     operator fun invoke(
@@ -186,17 +192,9 @@ internal object MessageSvcPbGetMsg : OutgoingPacketFactory<MessageSvcPbGetMsg.Re
             }
             .mapNotNull<MsgComm.Msg, Packet> { msg ->
 
-                msgQueueMutex.lock()
-                val msgUid = msg.msgHead.msgUid
-                if (msgUidSet.size > 50) {
-                    msgUidSet.remove(msgUidQueue.removeFirst())
-                }
-                if (!msgUidSet.add(msgUid)) {
-                    msgQueueMutex.unlock()
+                if (!ensureNoDuplication(msg)) {
                     return@mapNotNull null
                 }
-                msgQueueMutex.unlock()
-                msgUidQueue.addLast(msgUid)
 
                 suspend fun createGroupForBot(groupUin: Long): Group? {
                     val group = bot.getGroupByUinOrNull(groupUin)
